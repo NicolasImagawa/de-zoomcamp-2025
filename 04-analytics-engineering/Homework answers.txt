@@ -1,0 +1,136 @@
+I'm having issues trying to merge my dbt project to GitHub, sorry. So I left this txt file with the answers that I have.
+
+
+
+Q1 - Since there is a defined value for DBT_BIGQUERY_PROJECT, env_var will read "myproject" as the value of the database parameter on the source.yaml file. However, for the schema on the same file, there is no DBT_BIGQUERY_SOURCE_DATASET defined as an environment variable, only DBT_BIGQUERY_DATASET exists. This means that the schema will load its env_var default value.
+
+Therefore, the compiled SQL will be:
+
+select * from myproject.raw_nyc_tripdata.ext_green_taxi
+
+Q2 - Since the job level has the highest precedence, followed by the environment level and then the default environment value, the WHERE clause should be like the following to accept changes on the job level during development and default to 30 days to the analytics team.
+
+Update the WHERE clause to pickup_datetime >= CURRENT_DATE - INTERVAL '{{ var("days_back", env_var("DAYS_BACK", "30")) }}' DAY
+
+Q3 - In order to run only non-materializing builds and assuming all stg files are on the staging folder, the project will not apply for materializing if someone runs the lineage downstream beginning at the staging models:
+
+dbt run --select models/staging/+
+
+Q4 - 
+ - Setting a value for DBT_BIGQUERY_TARGET_DATASET env var is mandatory, or it'll fail to compile: FALSE - If DBT_BIGQUERY_STAGING_DATASET is set, the macro will compile.
+
+- Setting a value for DBT_BIGQUERY_STAGING_DATASET env var is mandatory, or it'll fail to compile: FALSE - If DBT_BIGQUERY_TARGET_DATASET is set, the macro will compile.
+
+- When using core, it materializes in the dataset defined in DBT_BIGQUERY_TARGET_DATASET: TRUE
+
+- When using stg, it materializes in the dataset defined in DBT_BIGQUERY_STAGING_DATASET, or defaults to DBT_BIGQUERY_TARGET_DATASET: TRUE, since the model_type is not 'core' the macro will look for the value defined on DBT_BIGQUERY_STAGING_DATASET if it exists, or default to the target dataset
+
+- When using staging, it materializes in the dataset defined in DBT_BIGQUERY_STAGING_DATASET, or defaults to DBT_BIGQUERY_TARGET_DATASET. TRUE, since the else statement will redirect the env_var to any model_type that isn't 'core'
+
+Q5 - green: {best: 2020/Q1, worst: 2020/Q2}, yellow: {best: 2020/Q1, worst: 2020/Q2}
+
+WITH
+  params AS (
+  SELECT
+    2020 AS year,
+    1 AS gap ),
+  data_year_1 AS (
+  SELECT
+    service_type,
+    trip_year,
+    trip_quarter,
+    concat(trip_year, '/Q', trip_quarter) as year_quarter,
+    SUM(total_amount) AS quarterly_revenue
+  FROM
+    `ny-rides-dtc.dbt_nimagawa.fact_trips`, params
+  WHERE
+    trip_year = params.year
+  GROUP BY
+    service_type,
+    trip_year,
+    trip_quarter),
+  data_year_2 AS (
+  SELECT
+    service_type,
+    trip_year,
+    trip_quarter,
+    concat(trip_year, '/Q', trip_quarter) as year_quarter,
+    SUM(total_amount) AS quarterly_revenue
+  FROM
+    `ny-rides-dtc.dbt_nimagawa.fact_trips`, params
+  WHERE
+    trip_year = params.year - params.gap
+  GROUP BY
+    service_type,
+    trip_year,
+    trip_quarter)
+SELECT
+  data_year_1.service_type,
+  data_year_1.trip_year,
+  data_year_1.trip_quarter,
+  data_year_1.year_quarter,
+  (data_year_1.quarterly_revenue - data_year_2.quarterly_revenue)/data_year_1.quarterly_revenue as YoY
+  from data_year_1, data_year_2, params
+  where data_year_1.trip_year = params.year
+  and data_year_2.trip_year = params.year - params.gap
+  and data_year_1.trip_quarter = data_year_2.trip_quarter
+  and data_year_1.service_type = data_year_2.service_type
+  order by 1, 4
+
+Q6 - green: {p97: 55.0, p95: 45.0, p90: 26.5}, yellow: {p97: 31.5, p95: 25.5, p90: 19.0}
+
+SELECT PERCENTILE_CONT(fare_amount, 0.97) OVER (PARTITION BY service_type, trip_year, trip_month) as p97,
+PERCENTILE_CONT(fare_amount, 0.95) OVER (PARTITION BY service_type, trip_year, trip_month) as p95,
+PERCENTILE_CONT(fare_amount, 0.90) OVER (PARTITION BY service_type, trip_year, trip_month) as p90
+FROM `ny-rides-dtc.dbt_nimagawa.fct_taxi_trips_monthly_fare_p95`
+where service_type = "Green"
+and trip_year = 2020
+and trip_month = 4
+LIMIT 1
+
+SELECT PERCENTILE_CONT(fare_amount, 0.97) OVER (PARTITION BY service_type, trip_year, trip_month) as p97,
+PERCENTILE_CONT(fare_amount, 0.95) OVER (PARTITION BY service_type, trip_year, trip_month) as p95,
+PERCENTILE_CONT(fare_amount, 0.90) OVER (PARTITION BY service_type, trip_year, trip_month) as p90
+FROM `ny-rides-dtc.dbt_nimagawa.fct_taxi_trips_monthly_fare_p95`
+where service_type = "Yellow"
+and trip_year = 2020
+and trip_month = 4
+LIMIT 1
+
+Q7 - LaGuardia Airport, Chinatown, Garment District
+
+SELECT pickup_borough,
+      pickup_zone,
+      dropoff_borough,
+      dropoff_zone,
+      trip_duration,
+      PERCENTILE_CONT(trip_duration, 0.90) OVER (PARTITION BY trip_year, trip_month, pickup_locationid, dropoff_locationid) as p90
+FROM `ny-rides-dtc.dbt_nimagawa.fct_fhv_monthly_zone_traveltime_p90`
+WHERE pickup_zone in ('Newark Airport')
+AND trip_year = 2019
+and trip_month = 11
+ORDER BY p90 DESC
+
+SELECT pickup_borough,
+      pickup_zone,
+      dropoff_borough,
+      dropoff_zone,
+      trip_duration,
+      PERCENTILE_CONT(trip_duration, 0.90) OVER (PARTITION BY trip_year, trip_month, pickup_locationid, dropoff_locationid) as p90
+FROM `ny-rides-dtc.dbt_nimagawa.fct_fhv_monthly_zone_traveltime_p90`
+WHERE pickup_zone in ('SoHo')
+AND trip_year = 2019
+and trip_month = 11
+ORDER BY p90 DESC
+
+SELECT pickup_borough,
+      pickup_zone,
+      dropoff_borough,
+      dropoff_zone,
+      trip_duration,
+      PERCENTILE_CONT(trip_duration, 0.90) OVER (PARTITION BY trip_year, trip_month, pickup_locationid, dropoff_locationid) as p90
+FROM `ny-rides-dtc.dbt_nimagawa.fct_fhv_monthly_zone_traveltime_p90`
+WHERE pickup_zone in ('Yorkville East')
+AND trip_year = 2019
+and trip_month = 11
+ORDER BY p90 DESC
